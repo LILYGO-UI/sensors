@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 package = "lilygo-ui-sensors"
-version = "0.1.4"
+version = "0.1.0"
 app_id = "cc.lilygo.ui.Sensors"
 title = "Sensors"
 summary = "Live sensor measurements and I2C device inventory"
