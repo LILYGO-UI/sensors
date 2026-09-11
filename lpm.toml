@@ -1,0 +1,91 @@
+schema_version = 1
+
+[project]
+package = "lilygo-ui-sensors"
+version = "0.1.4"
+app_id = "cc.lilygo.ui.Sensors"
+title = "Sensors"
+summary = "Live sensor measurements and I2C device inventory"
+description = "Inspect sensor measurements, recent history and both I2C buses on LILYGO Linux boards, with CSV recording and a command-line diagnostic mode."
+license = "MIT"
+source_repo = "https://github.com/LILYGO-UI/sensors"
+homepage = "https://github.com/LILYGO-UI/sensors"
+categories = ["Science", "Utilities"]
+
+[[project.authors]]
+name = "LILYGO"
+email = "110239031@qq.com"
+
+[project.assets]
+icon = "assets/app-icon.png"
+
+[[project.assets.screenshots]]
+path = "assets/previews/sensors-list.png"
+caption = "Sensor list (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/sensors-detail.png"
+caption = "Sensor detail and live history (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/sensors-charts.png"
+caption = "Sensor history charts (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/sensors-detail-landscape.png"
+caption = "Sensor detail in landscape (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/keyboard-detail.png"
+caption = "Keyboard events and held keys (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/sensors-buses.png"
+caption = "I2C bus and device inventory (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/microphone-detail.png"
+caption = "Microphone waveform and RMS level (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/microphone-charts.png"
+caption = "Microphone waveform and RMS history charts (simulator)"
+
+[[project.assets.screenshots]]
+path = "assets/previews/microphone-detail-landscape.png"
+caption = "Microphone detail in landscape (simulator)"
+
+[[project.permissions]]
+id = "i2c"
+reason = "Inspect I2C adapters and read supported attached sensors"
+
+[[project.permissions]]
+id = "imu"
+reason = "Read sensor measurements through Linux IIO and hwmon interfaces"
+
+[[project.permissions]]
+id = "microphone"
+reason = "Measure microphone RMS, peak level and clipping through ALSA capture"
+
+[[project.permissions]]
+id = "filesystem"
+access = "read-write"
+scope = "app-data"
+reason = "Record sensor measurements as CSV files"
+
+[project.compatibility]
+architectures = ["arm64"]
+min_appkit_version = "0.1.0"
+
+[project.launcher]
+order = 92
+
+[build]
+host_preset = "host-simulator"
+cross_preset = "cm0-cross"
+package_dir = "dist"
+
+[deploy]
+host = "192.168.8.206"
+user = "pi"
+port = 22

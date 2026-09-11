@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>LilyGo UI Sensors</title>
+  <desc>A sensor chip with an ECG waveform.</desc>
+
+  <!-- Rounded app tile, kept inset to preserve the transparent corner margin. -->
+  <rect x="2" y="2" width="124" height="124" rx="26" fill="#173F43"/>
+
+  <!-- Chip pins -->
+  <g fill="#A3DCD4">
+    <rect x="40" y="18" width="6" height="15" rx="2"/>
+    <rect x="61" y="18" width="6" height="15" rx="2"/>
+    <rect x="82" y="18" width="6" height="15" rx="2"/>
+    <rect x="40" y="95" width="6" height="15" rx="2"/>
+    <rect x="61" y="95" width="6" height="15" rx="2"/>
+    <rect x="82" y="95" width="6" height="15" rx="2"/>
+    <rect x="18" y="40" width="15" height="6" rx="2"/>
+    <rect x="18" y="61" width="15" height="6" rx="2"/>
+    <rect x="18" y="82" width="15" height="6" rx="2"/>
+    <rect x="95" y="40" width="15" height="6" rx="2"/>
+    <rect x="95" y="61" width="15" height="6" rx="2"/>
+    <rect x="95" y="82" width="15" height="6" rx="2"/>
+  </g>
+
+  <!-- Chip package -->
+  <rect x="29" y="29" width="70" height="70" rx="12" fill="#F4FAF8"/>
+
+  <!-- Sensor waveform -->
+  <polyline points="39,67 48,67 55,50 64,79 74,57 80,67 89,67" fill="none" stroke="#138F83" stroke-width="5" stroke-linecap="butt" stroke-linejoin="round"/>
+
+  <!-- Status indicator -->
+  <rect x="79" y="36" width="11" height="11" rx="5" fill="#E9B94D"/>
+</svg>
