@@ -32,33 +32,45 @@ in the application and are never used as a fallback for real hardware errors.
 
 ## Build And Run
 
-Requirements include CMake 3.21+, a C++17 compiler, Git, Make, LPM,
-`pkg-config`, SDL2, and FreeType. Linux builds also need ALSA development
-headers. Initialize the pinned AppKit submodule before configuring:
+Requirements include Python 3.11+, CMake 3.21+, a C++17 compiler, Git, Make,
+`pkg-config`, SDL2, FreeType, and LPM. Linux builds also need ALSA development
+headers. Initialize the pinned AppKit submodule and install LPM before building:
 
 ```sh
 git submodule update --init --recursive
-cmake --preset host-simulator
-cmake --build --preset host-simulator --parallel
-ctest --preset host-simulator
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install "git+https://github.com/LILYGO-UI/lpm.git"
+lpm --version
 ```
 
-Run the desktop simulator with demo data:
+Build and run the desktop simulator with demo data:
 
 ```sh
-LILYGO_SENSORS_DEMO=1 ./build/host-simulator/lilygo-ui-sensors
+LILYGO_SENSORS_DEMO=1 lpm start --foreground
+```
+
+Remove `LILYGO_SENSORS_DEMO=1` to use real host interfaces instead of demo data.
+Run the host test suite with:
+
+```sh
+lpm test
 ```
 
 Build the ARM64 Debian package:
 
 ```sh
-cmake --preset cm0-cross
-cmake --build --preset cm0-cross --parallel
-cpack --config build/cm0-cross/CPackConfig.cmake -B dist
+lpm pack
 ```
 
-The detailed dependency, cross-build, packaging, and troubleshooting steps are
-in the [build guide](docs/02-building.md).
+Deploy the package using the host, user, and port in `lpm.toml`:
+
+```sh
+lpm deploy
+```
+
+The detailed dependency, LPM, cross-build, packaging, and troubleshooting steps
+are in the [build guide](docs/02-building.md).
 
 ## Diagnostics
 

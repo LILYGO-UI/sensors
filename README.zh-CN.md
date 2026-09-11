@@ -28,31 +28,43 @@ LILYGO Launcher 的 **Sensors** 图标打开。
 
 ## 构建和运行
 
-需要 CMake 3.21+、C++17 编译器、Git、Make、LPM、`pkg-config`、SDL2 和 FreeType。
-Linux 麦克风支持还需要 ALSA 开发头文件。首次配置前初始化 AppKit 子模块：
+需要 Python 3.11+、CMake 3.21+、C++17 编译器、Git、Make、`pkg-config`、SDL2、
+FreeType 和 LPM。Linux 麦克风支持还需要 ALSA 开发头文件。首次构建前初始化
+AppKit 子模块并安装 LPM：
 
 ```sh
 git submodule update --init --recursive
-cmake --preset host-simulator
-cmake --build --preset host-simulator --parallel
-ctest --preset host-simulator
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install "git+https://github.com/LILYGO-UI/lpm.git"
+lpm --version
 ```
 
-使用演示数据运行桌面模拟器：
+使用 LPM 构建并运行桌面模拟器：
 
 ```sh
-LILYGO_SENSORS_DEMO=1 ./build/host-simulator/lilygo-ui-sensors
+LILYGO_SENSORS_DEMO=1 lpm start --foreground
+```
+
+移除 `LILYGO_SENSORS_DEMO=1` 可读取主机真实接口。运行主机测试：
+
+```sh
+lpm test
 ```
 
 构建 ARM64 Debian 安装包：
 
 ```sh
-cmake --preset cm0-cross
-cmake --build --preset cm0-cross --parallel
-cpack --config build/cm0-cross/CPackConfig.cmake -B dist
+lpm pack
 ```
 
-完整依赖、交叉构建、打包和排错步骤见[构建与测试](docs/02-building.md)。
+使用 `lpm.toml` 中的主机、用户和端口部署安装包：
+
+```sh
+lpm deploy
+```
+
+完整依赖、LPM、交叉构建、打包和排错步骤见[构建与测试](docs/02-building.md)。
 
 ## 诊断
 
