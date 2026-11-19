@@ -1,5 +1,7 @@
 #include "pages/sensors/sensor_source.hpp"
+#include "pages/sensors/aht20.hpp"
 #include "pages/sensors/i2c_probe.hpp"
+#include "pages/sensors/sensors_model.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -204,6 +206,54 @@ void physical_device_identity()
             "non-I2C devices fall back to canonical sensor directory, never name");
 }
 
+void k230_aht20_hwmon()
+{
+    std::array<std::uint8_t, 7> frame{0x18, 0x3b, 0x7b, 0xc7, 0x42, 0x30, 0xb2};
+    auto direct = decode_aht20(frame);
+    require(direct.error.empty(), "accept real K230 AHT20 frame");
+    near(direct.temperature, 0x74230 * 200.0 / 1048576 - 50, "AHT20 frame temperature");
+    near(direct.humidity, 0x3b7bc * 100.0 / 1048576, "AHT20 frame humidity");
+    frame.back() ^= 1;
+    require(!decode_aht20(frame).error.empty(), "reject corrupt AHT20 frame");
+
+    Fixture fixture;
+    const auto client = fixture.paths.sys / "devices/platform/keyboard-i2c/i2c-7/7-0038";
+    fixture.write(client / "name", "aht20");
+    fs::create_directory_symlink(client, fixture.paths.sys / "bus/i2c/devices/7-0038");
+    require(read_linux_snapshot(fixture.paths).sensors.empty(), "an unbound AHT20 has no measurements");
+
+    const auto hwmon = client / "hwmon/hwmon4";
+    fixture.write(hwmon / "name", "aht20");
+    fixture.write(hwmon / "temp1_input", "-5230");
+    fixture.write(hwmon / "humidity1_input", "67890");
+    fs::create_directory_symlink(hwmon, fixture.paths.sys / "class/hwmon/hwmon4");
+
+    const auto result = read_linux_snapshot(fixture.paths);
+    const auto &temp = find(result, "temperature", "aht20");
+    const auto &rh = find(result, "humidity", "aht20");
+    require(result.sensors.size() == 2 && temp.available && rh.available, "both AHT20 channels are readable");
+    require(temp.device_id == fs::canonical(client).string() && rh.device_id == temp.device_id &&
+            temp.location == "i2c-7" && rh.location == "i2c-7", "both readings follow the K230 I2C adapter");
+    require(temp.name == "Ambient temperature" && rh.name == "Relative humidity", "AHT20 measurement labels");
+    require(temp.channels.at(0).unit == "C" && rh.channels.at(0).unit == "%", "AHT20 display units");
+    near(temp.channels[0].value, -5.23, "AHT20 temperature in Celsius");
+    near(rh.channels[0].value, 67.89, "AHT20 relative humidity in percent");
+
+    SensorsModel model;
+    model.ingest(result);
+    const auto devices = model.visible_devices();
+    require(devices.size() == 1 && devices[0].name == "AHT20" && devices[0].readings.size() == 2,
+            "K230 shows one AHT20 device with both measurements");
+
+    Fixture cm0;
+    const auto imu = cm0.iio();
+    cm0.write(imu / "in_temp_input", "30250");
+    model.ingest(read_linux_snapshot(cm0.paths));
+    const auto cm0_devices = model.visible_devices();
+    require(cm0_devices.size() == 1 && cm0_devices[0].name == "qmi8658c",
+            "CM0 shows its IMU temperature without an onboard AHT20");
+}
+
 void failures_and_reconnection()
 {
     Fixture fixture;
@@ -258,6 +308,137 @@ void failures_and_reconnection()
     fixture.write(gauge / "power1_input", "2500000");
     result = read_linux_snapshot(fixture.paths);
     near(find(result, "power").channels[0].value, 2.5, "hwmon uW to W and input preference");
+}
+
+void bq25896_power_supply()
+{
+    Fixture fixture;
+    fixture.paths.k230_power_supply = fixture.root / "run/lilygo-k230/power_supply";
+    const auto supply = fixture.paths.k230_power_supply / "bq25890-charger";
+    const auto bus = fixture.paths.sys / "bus/i2c/devices";
+    const auto client = bus / "7-006b";
+    fixture.write(client / "name", "bq25890");
+    fixture.write(bus / "i2c-7/name", "keyboard-i2c");
+    fixture.write(supply / "model_name", "BQ25890");
+    fixture.write(supply / "voltage_now", "4300000");
+    fixture.write(fixture.paths.k230_power_supply / "bq27220-battery/model_name", "bq27541");
+    fixture.write(fixture.paths.k230_power_supply / "bq27220-battery/current_now", "-111000");
+    require(read_linux_snapshot(fixture.paths).sensors.empty(), "charger family name and address alone cannot identify BQ25896");
+
+    fixture.write(supply / "model_name", "BQ25896");
+    fixture.write(supply / "current_now", "650000");
+    fixture.write(supply / "constant_charge_current", "704000");
+    fixture.write(supply / "constant_charge_voltage", "4288000");
+    fixture.write(supply / "input_current_limit", "3250000");
+    fixture.write(supply / "online", "1");
+    fixture.write(supply / "status", "Charging");
+    fixture.write(supply / "charge_type", "Fast");
+    fixture.write(supply / "health", "Good");
+    auto result = read_linux_snapshot(fixture.paths);
+    require(!result.simulated && result.sensors.size() == 9, "read charger states and channels from the board service");
+    for (const auto &reading : result.sensors)
+        require(reading.device == "BQ25896" && reading.available && reading.location == "i2c-7" &&
+                reading.device_id == fs::canonical(client).string(), "charger readings share one physical client");
+    require(result.buses.at(0).devices.at(0).name == "BQ25896", "bus inventory shows the verified part number");
+    const auto &voltage = find(result, "voltage");
+    require(voltage.name == "USB input voltage" && voltage.channels[0].unit == "V", "service voltage_now is VBUS");
+    near(voltage.channels[0].value, 4.3, "microvolts to volts");
+    near(find(result, "current").channels[0].value, 650, "measured charge current in mA");
+    near(find(result, "current_target").channels[0].value, 704, "configured current is separate");
+    near(find(result, "current_limit").channels[0].value, 3250, "input current limit in mA");
+    near(find(result, "voltage_target").channels[0].value, 4288, "regulation setting in mV");
+    require(find(result, "status").text_value == "Charging", "keep charging state as text");
+
+    fs::remove(supply / "voltage_now");
+    fixture.write(supply / "current_now", "invalid");
+    fixture.write(supply / "online", "0");
+    fixture.write(supply / "status", "Discharging");
+    result = read_linux_snapshot(fixture.paths);
+    require(result.sensors.size() == 8 && !find(result, "current").available && find(result, "online").available &&
+            find(result, "online").channels[0].value == 0 && find(result, "status").text_value == "Discharging",
+            "missing ADC attributes, bad samples and offline state stay distinct");
+
+    const auto kernel = fixture.paths.sys / "class/power_supply/bq25890-charger-0";
+    fixture.write(kernel / "model_name", "BQ25896");
+    fixture.write(kernel / "voltage_now", "4100000");
+    fs::create_directory_symlink(client, kernel / "device");
+    result = read_linux_snapshot(fixture.paths);
+    require(result.sensors.size() == 1 && result.sensors[0].name == "Battery voltage" &&
+            result.sensors[0].device_id == fs::canonical(client).string(), "native VBAT takes precedence over the mirror");
+    near(result.sensors[0].channels[0].value, 4.1, "native battery voltage in V");
+}
+
+void bq27220_power_supply()
+{
+    Fixture fixture;
+    const auto root = fixture.root / "run/lilygo-k230/power_supply";
+    fixture.paths.k230_power_supply = root;
+    const auto gauge = root / "bq27220-battery";
+    const auto bus = fixture.paths.sys / "bus/i2c/devices";
+    const auto client = bus / "9-0055";
+    fixture.write(bus / "i2c-9/name", "keyboard-i2c");
+    fixture.write(client / "name", "bq27220");
+    fixture.write(bus / "9-006b/name", "bq25890");
+    fixture.write(root / "bq25890-charger/model_name", "BQ25896");
+    fixture.write(root / "bq25890-charger/current_now", "650000");
+    fixture.write(gauge / "capacity", "95");
+    auto snapshot = read_linux_snapshot(fixture.paths);
+    require(snapshot.sensors.size() == 1 && snapshot.sensors.front().device == "BQ25896",
+            "a gauge directory or declared I2C client alone does not identify a live gauge");
+    fixture.write(gauge / "model_name", "bq27220");
+    fixture.write(gauge / "voltage_now", "4211000");
+    fixture.write(gauge / "current_now", "-123000");
+    fixture.write(gauge / "temp", "366");
+    fixture.write(gauge / "charge_now", "3066000");
+    fixture.write(gauge / "charge_full", "3253000");
+    fixture.write(gauge / "charge_full_design", "3000000");
+    fixture.write(gauge / "cycle_count", "1");
+    fixture.write(gauge / "time_to_empty_now", "7200");
+    fixture.write(gauge / "status", "Discharging");
+    snapshot = read_linux_snapshot(fixture.paths);
+    const auto check = [&](const char *category, const char *unit, double expected) {
+        const auto &r = find(snapshot, category, "BQ27220");
+        require(r.available && r.device_id == fs::canonical(client).string() && r.location == "i2c-9" &&
+                r.channels.at(0).unit == unit, std::string("gauge identity and units: ") + category);
+        near(r.channels[0].value, expected, category);
+    };
+    check("capacity", "%", 95);
+    check("voltage", "V", 4.211);
+    check("current", "mA", -123);
+    check("temperature", "C", 36.6);
+    check("charge", "mAh", 3066);
+    check("charge_full", "mAh", 3253);
+    check("charge_design", "mAh", 3000);
+    check("cycles", "cycles", 1);
+    check("time_to_empty", "min", 120);
+    require(find(snapshot, "status", "BQ27220").text_value == "Discharging" &&
+            snapshot.buses.at(0).devices.at(0).name == "BQ27220", "gauge status and bus inventory");
+    SensorsModel model;
+    model.ingest(snapshot);
+    require(model.visible_devices().size() == 2, "the gauge and the charger have distinct detail pages");
+    fs::remove(gauge / "time_to_empty_now");
+    fixture.write(gauge / "time_to_full_now", "900");
+    fixture.write(gauge / "current_now", "500000");
+    fixture.write(gauge / "temp", "unreadable");
+    snapshot = read_linux_snapshot(fixture.paths);
+    check("time_to_full", "min", 15);
+    check("current", "mA", 500);
+    require(!find(snapshot, "temperature", "BQ27220").available && std::none_of(snapshot.sensors.begin(),
+        snapshot.sensors.end(), [](const SensorReading &r) { return r.category == "time_to_empty"; }),
+        "unavailable estimates disappear and invalid samples keep their error state");
+
+    // The native bq27xxx driver has no model_name and may also publish the same voltage through hwmon.
+    const auto native = fixture.paths.sys / "class/power_supply/bq27220-0";
+    fixture.write(native / "type", "Battery");
+    fs::create_directory_symlink(client, native / "device");
+    fixture.write(native / "voltage_now", "4100000");
+    const auto mirror = fixture.hwmon("bq27220_0", 0);
+    fixture.write(mirror / "in0_input", "4100");
+    fs::create_directory_symlink(native, mirror / "device");
+    snapshot = read_linux_snapshot(fixture.paths);
+    require(snapshot.sensors.size() == 2 && find(snapshot, "current", "BQ25896").available,
+            "native gauge replaces its mirrors while the service charger remains visible");
+    check("voltage", "V", 4.1);
 }
 
 void iio_scale_exceptions()
@@ -484,6 +665,9 @@ int main()
     try {
         units_and_grouping();
         physical_device_identity();
+        k230_aht20_hwmon();
+        bq25896_power_supply();
+        bq27220_power_supply();
         failures_and_reconnection();
         iio_scale_exceptions();
         hwmon_input_faults();

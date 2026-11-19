@@ -70,6 +70,7 @@ void SensorsModel::ingest(Snapshot snapshot)
     const double seconds = std::chrono::duration<double>(snapshot_.timestamp - origin_).count();
     const std::string wall_time = recording() ? utc_timestamp() : "";
     for (const auto &sensor : snapshot_.sensors) {
+        if (sensor.text_value) continue;
         auto &history = histories_[sensor.id];
         const auto count = sensor.channels.size();
         if (history.minimum.size() != count) {
@@ -136,8 +137,9 @@ std::vector<SensorDevice> SensorsModel::visible_devices() const
         if (inserted) {
             const auto path = std::filesystem::path(sensor->device_id).is_absolute()
                                   ? sensor->device_id : sensor->path;
-            result.push_back({sensor->device_id, sensor->device.empty() ? sensor->name : sensor->device,
-                              sensor->location, path, {}});
+            auto name = sensor->device.empty() ? sensor->name : sensor->device;
+            if (sensor->device == "aht20") name = "AHT20";
+            result.push_back({sensor->device_id, name, sensor->location, path, {}});
         }
         result[found->second].readings.push_back(sensor);
     }

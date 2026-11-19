@@ -36,6 +36,7 @@ private:
         lv_obj_t *plot = nullptr;
         lv_obj_t *error = nullptr;
         lv_obj_t *chart = nullptr;
+        lv_obj_t *text = nullptr;
         lv_obj_t *range = nullptr;
         lv_obj_t *times = nullptr;
         std::vector<Channel> channels;

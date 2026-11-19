@@ -388,9 +388,9 @@ void SensorsView::layout()
     lv_obj_add_flag(detail_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(detail_, LV_DIR_VER);
     for (auto &measurement : measurements_) {
-        for (auto *section : {measurement.object, measurement.plot}) {
-            lv_obj_set_width(section, LV_PCT(100));
-        }
+        lv_obj_set_width(measurement.object, LV_PCT(100));
+        if (!measurement.chart) continue;
+        lv_obj_set_width(measurement.plot, LV_PCT(100));
         lv_obj_set_height(measurement.chart, lv_obj_get_content_height(surface_) >= 700 ? 260 : 200);
     }
     laying_out_ = false;
@@ -524,6 +524,10 @@ void SensorsView::refresh_detail()
     lv_label_set_text(list_recording_, list_recording.c_str());
     hidden(list_recording_, list_recording.empty());
     if (device.readings.empty() || !view_model_.showing_detail()) return;
+    const bool text_only = std::all_of(device.readings.begin(), device.readings.end(),
+        [](const auto *reading) { return reading->text_value.has_value(); });
+    hidden(plot_header_, text_only);
+    hidden(plots_, text_only);
     lv_label_set_text(detail_name_, device.name.c_str());
     lv_label_set_text(detail_category_, device.location.c_str());
     const auto available = std::count_if(device.readings.begin(), device.readings.end(),
@@ -545,6 +549,7 @@ void SensorsView::refresh_detail()
     std::string signature = device.id;
     for (const auto *sensor : device.readings) {
         signature += "\n" + sensor->id + ":" + sensor->name;
+        if (sensor->text_value) signature += ":text";
         signature += ":waveform=" + std::to_string(sensor->waveform.size());
         for (const auto &channel : sensor->channels) signature += "\n" + channel.name + ":" + channel.unit;
     }
@@ -563,6 +568,13 @@ void SensorsView::refresh_detail()
             lv_obj_set_width(label(section, sensor->name.c_str(), 24), LV_PCT(100));
             measurement.error = label(section, "Unavailable", 18, fault_color);
             lv_obj_set_width(measurement.error, LV_PCT(100));
+            if (sensor->text_value) {
+                measurement.text = label(section, "", 24);
+                lv_obj_set_name(measurement.text, ("sensor_text_" + sensor->id).c_str());
+                lv_obj_set_width(measurement.text, LV_PCT(100));
+                measurements_.push_back(std::move(measurement));
+                continue;
+            }
             const bool waveform = sensor->category == "microphone" && sensor->name == "Raw waveform";
             auto *values = waveform ? nullptr : column(section);
             if (values) {
@@ -638,6 +650,11 @@ void SensorsView::refresh_detail()
         const auto *sensor = device.readings[reading];
         const auto *history = model.history(sensor->id);
         hidden(measurement.error, sensor->available);
+        if (measurement.text) {
+            lv_label_set_text(measurement.text, sensor->available ? sensor->text_value->c_str() : "");
+            hidden(measurement.text, !sensor->available);
+            continue;
+        }
         for (std::size_t index = 0; index < measurement.channels.size(); ++index) {
             auto &channel = measurement.channels[index];
             lv_label_set_text(channel.value, sensor->available ? number(sensor->channels[index].value).c_str() : "--");

@@ -1,4 +1,5 @@
 #include "pages/sensors/sensor_source.hpp"
+#include "pages/sensors/aht20.hpp"
 #include "pages/sensors/i2c_probe.hpp"
 #include "pages/sensors/microphone_source.hpp"
 
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <initializer_list>
 #include <iterator>
 #include <locale>
 #include <map>
@@ -153,6 +155,11 @@ struct Discovery {
     std::vector<Sensor> sensors;
     std::vector<BusInfo> buses;
     std::string error;
+#if defined(__linux__) && LILYGO_UI_PLATFORM_K230
+    fs::path aht20_adapter;
+    std::array<SensorReading, 2> aht20_channels;
+    Clock::time_point aht20_next{};
+#endif
 };
 
 struct Kind {
@@ -287,6 +294,10 @@ void discover_hwmon(const SourcePaths &paths, Discovery &result)
                 if (base.find(kind.attribute) != 0) continue;
                 auto sensor = make_sensor(directory, name, base, kind);
                 auto label = optional_text(directory / (base + "_label"));
+                if (label.empty() && name == "aht20") {
+                    if (base == "temp1") label = "Ambient temperature";
+                    else if (base == "humidity1") label = "Relative humidity";
+                }
                 sensor.reading.name = label.empty() ? std::string(kind.title) + " " + base.substr(std::strlen(kind.attribute)) : label;
                 sensor.reading.channels.push_back({kind.title, kind.unit, 0});
                 Channel channel;
@@ -299,6 +310,137 @@ void discover_hwmon(const SourcePaths &paths, Discovery &result)
             }
         }
     }
+}
+
+fs::path k230_power_client(const SourcePaths &paths, const char *address,
+                           std::initializer_list<const char *> names, std::string &error)
+{
+    const auto bus_root = paths.sys / "bus/i2c/devices";
+    static const std::regex pattern("([0-9]+)-([0-9a-f]{4})");
+    for (const auto &client : entries(bus_root, error)) {
+        std::smatch match;
+        const auto id = client.filename().string();
+        if (!std::regex_match(id, match, pattern) || match[2] != address) continue;
+        const auto name = optional_text(client / "name");
+        if (std::find(names.begin(), names.end(), name) != names.end() &&
+            optional_text(bus_root / ("i2c-" + match[1].str()) / "name") == "keyboard-i2c") return client;
+    }
+    return {};
+}
+
+template <std::size_t N>
+void add_supply_fields(const fs::path &supply, const fs::path &client, const char *model,
+                       const Kind (&fields)[N], Discovery &result)
+{
+    for (const auto &field : fields) {
+        const auto attribute = supply / field.attribute;
+        std::error_code ec;
+        if (!fs::exists(attribute, ec)) continue;
+        auto sensor = make_sensor(supply, model, field.attribute, field);
+        sensor.reading.path = attribute.string();
+        if (!client.empty()) {
+            sensor.reading.device_id = canonical_path(client).string();
+            sensor.reading.location = location(client);
+        }
+        if (field.unit) {
+            sensor.reading.channels.push_back({field.title, field.unit, 0});
+            Channel channel;
+            channel.value_path = attribute;
+            channel.conversion = field.conversion;
+            sensor.channels.push_back(std::move(channel));
+        } else {
+            sensor.reading.text_value.emplace();
+        }
+        result.sensors.push_back(std::move(sensor));
+    }
+}
+
+void add_bq25896(const fs::path &supply, const fs::path &client, bool board_service, Discovery &result)
+{
+    // The K230 power service publishes VBUS in voltage_now. The kernel driver publishes VBAT.
+    const Kind fields[] = {
+        {"status", "status", "Charging status", nullptr, 1},
+        {"charge_type", "status", "Charge type", nullptr, 1},
+        {"health", "status", "Charger health", nullptr, 1},
+        {"online", "online", "USB online", "0/1", 1},
+        {"voltage_now", "voltage", board_service ? "USB input voltage" : "Battery voltage", "V", 1e-6},
+        {"current_now", "current", "Charge current", "mA", 0.001},
+        {"input_current_limit", "current_limit", "Input current limit", "mA", 0.001},
+        {"constant_charge_current", "current_target", "Charge current setting", "mA", 0.001},
+        {"constant_charge_voltage", "voltage_target", "Charge voltage setting", "mV", 0.001},
+    };
+    add_supply_fields(supply, client, "BQ25896", fields, result);
+}
+
+constexpr Kind bq27220_fields[] = {
+    {"capacity", "capacity", "State of charge", "%", 1},
+    {"status", "status", "Battery status", nullptr, 1},
+    {"voltage_now", "voltage", "Battery voltage", "V", 1e-6},
+    {"current_now", "current", "Battery current", "mA", 0.001},
+    {"temp", "temperature", "Battery temperature", "C", 0.1},
+    {"charge_now", "charge", "Remaining capacity", "mAh", 0.001},
+    {"charge_full", "charge_full", "Full charge capacity", "mAh", 0.001},
+    {"charge_full_design", "charge_design", "Design capacity", "mAh", 0.001},
+    {"cycle_count", "cycles", "Cycle count", "cycles", 1},
+    {"time_to_empty_now", "time_to_empty", "Time to empty", "min", 1.0 / 60},
+    {"time_to_full_now", "time_to_full", "Time to full", "min", 1.0 / 60},
+    {"present", "present", "Battery present", "0/1", 1},
+    {"technology", "technology", "Battery chemistry", nullptr, 1},
+    {"health", "health", "Battery health", nullptr, 1},
+    {"power_avg", "power", "Average battery power", "W", 1e-6},
+};
+
+bool is_bq27220(const std::string &name)
+{
+    return name == "bq27220" || name == "BQ27220";
+}
+
+void discover_power_supplies(const SourcePaths &paths, Discovery &result)
+{
+    bool kernel_charger = false;
+    std::map<fs::path, std::set<std::string>> native_gauge_channels;
+    for (const auto &supply : entries(paths.sys / "class/power_supply", result.error)) {
+        const auto model = optional_text(supply / "model_name");
+        if (model == "BQ25896") {
+            add_bq25896(supply, {}, false, result);
+            kernel_charger = true;
+        } else if (is_bq27220(model) || (model.empty() && optional_text(supply / "type") == "Battery" &&
+                                         is_bq27220(optional_text(supply / "device/name")))) {
+            // The bq27xxx kernel driver identifies the gauge through the parent I2C client.
+            const auto first = result.sensors.size();
+            add_supply_fields(supply, {}, "BQ27220", bq27220_fields, result);
+            const auto directory = canonical_path(supply);
+            for (std::size_t i = first; i < result.sensors.size(); ++i)
+                native_gauge_channels[directory].insert(result.sensors[i].reading.category);
+        }
+    }
+    if (!native_gauge_channels.empty()) {
+        // Keep hwmon-only channels while dropping duplicates exported by power_supply.
+        const auto hwmon = paths.sys / "class/hwmon";
+        result.sensors.erase(std::remove_if(result.sensors.begin(), result.sensors.end(), [&](const Sensor &sensor) {
+            const fs::path path = sensor.reading.path;
+            if (path.parent_path() != hwmon) return false;
+            const auto native = native_gauge_channels.find(canonical_path(path / "device"));
+            return native != native_gauge_channels.end() && native->second.count(sensor.reading.category) != 0;
+        }), result.sensors.end());
+    }
+    if (kernel_charger && !native_gauge_channels.empty()) return;
+
+    auto root = paths.k230_power_supply;
+#if LILYGO_UI_PLATFORM_K230
+    if (root.empty() && paths.sys == LILYGO_UI_DEFAULT_SYSFS_ROOT && paths.dev == LILYGO_UI_DEFAULT_DEV_ROOT) {
+        const char *configured = std::getenv("CM0_POWER_SUPPLY_DIR");
+        root = configured && *configured ? configured : "/run/lilygo-k230/power_supply";
+    }
+#endif
+    if (root.empty()) return;
+    const auto charger = root / "bq25890-charger";
+    if (!kernel_charger && optional_text(charger / "model_name") == "BQ25896")
+        add_bq25896(charger, k230_power_client(paths, "006b", {"bq25890", "bq25896"}, result.error), true, result);
+    const auto gauge = root / "bq27220-battery";
+    if (native_gauge_channels.empty() && is_bq27220(optional_text(gauge / "model_name")))
+        add_supply_fields(gauge, k230_power_client(paths, "0055", {"bq27220"}, result.error),
+                          "BQ27220", bq27220_fields, result);
 }
 
 void discover_buses(const SourcePaths &paths, Discovery &result)
@@ -327,6 +469,13 @@ void discover_buses(const SourcePaths &paths, Discovery &result)
             BusDevice device;
             device.address = address;
             device.name = optional_text(directory / "name");
+            if ((address == 0x6b && device.name == "bq25890") || (address == 0x55 && device.name == "bq27220")) {
+                const char *model = address == 0x55 ? "BQ27220" : "BQ25896";
+                const auto id = canonical_path(directory).string();
+                if (std::any_of(result.sensors.begin(), result.sensors.end(), [&](const Sensor &sensor) {
+                    return sensor.reading.device == model && sensor.reading.device_id == id;
+                })) device.name = model;
+            }
             if (device.name.empty()) device.name = optional_text(directory / "modalias");
             if (device.name.empty()) device.name = "I2C device";
             std::error_code ec;
@@ -363,6 +512,30 @@ Discovery discover(const SourcePaths &paths, bool refresh_buses = true)
     Discovery result;
     discover_iio(paths, result);
     discover_hwmon(paths, result);
+    discover_power_supplies(paths, result);
+#if defined(__linux__) && LILYGO_UI_PLATFORM_K230
+    // Some K230 kernels declare the client but fail to bind the hwmon driver.
+    if (paths.probe_i2c && paths.sys == "/sys" && paths.dev == "/dev") {
+        static const std::regex client_pattern("([0-9]+)-0038");
+        for (const auto &client : entries(paths.sys / "bus/i2c/devices", result.error)) {
+            std::smatch match;
+            const auto id = client.filename().string();
+            if (!std::regex_match(id, match, client_pattern) || optional_text(client / "name") != "aht20") continue;
+            std::error_code ec;
+            const auto driver = fs::symlink_status(client / "driver", ec);
+            if (driver.type() != fs::file_type::not_found || (ec && ec != std::errc::no_such_file_or_directory)) continue;
+            result.aht20_adapter = paths.dev / ("i2c-" + match[1].str());
+            for (int i = 0; i < 2; ++i) {
+                const auto &kind = scalar_kinds[i];
+                auto reading = make_sensor(client, "aht20", kind.attribute, kind).reading;
+                reading.name = i == 0 ? "Ambient temperature" : "Relative humidity";
+                reading.channels.push_back({kind.title, kind.unit, 0});
+                result.aht20_channels[i] = std::move(reading);
+            }
+            break;
+        }
+    }
+#endif
     if (refresh_buses) discover_buses(paths, result);
     return result;
 }
@@ -390,6 +563,11 @@ bool read_parameter(const std::vector<fs::path> &paths, bool required, double &v
 SensorReading sample_sensor(const Sensor &sensor)
 {
     auto reading = sensor.reading;
+    if (reading.text_value) {
+        reading.available = read_text(reading.path, *reading.text_value, reading.error);
+        reading.timestamp = Clock::now();
+        return reading;
+    }
     reading.available = true;
     for (std::size_t i = 0; i < sensor.channels.size(); ++i) {
         const auto &channel = sensor.channels[i];
@@ -466,7 +644,25 @@ Snapshot sample(Discovery &discovery, MicrophoneSource *microphone = nullptr)
         result.sensors.insert(result.sensors.end(), std::make_move_iterator(readings.begin()),
                               std::make_move_iterator(readings.end()));
     }
-    if (result.sensors.empty()) append_error(result.error, "No supported IIO or hwmon sensor channels found");
+#if defined(__linux__) && LILYGO_UI_PLATFORM_K230
+    if (!discovery.aht20_adapter.empty()) {
+        auto &channels = discovery.aht20_channels;
+        if (Clock::now() >= discovery.aht20_next) {
+            const auto sample = read_aht20(discovery.aht20_adapter);
+            const auto now = Clock::now();
+            channels[0].channels[0].value = sample.temperature;
+            channels[1].channels[0].value = sample.humidity;
+            for (auto &reading : channels) {
+                reading.timestamp = now;
+                reading.error = sample.error;
+                reading.available = sample.error.empty();
+            }
+            discovery.aht20_next = now + std::chrono::seconds(2);
+        }
+        result.sensors.insert(result.sensors.end(), channels.begin(), channels.end());
+    }
+#endif
+    if (result.sensors.empty()) append_error(result.error, "No supported sensor channels found");
     result.timestamp = Clock::now();
     return result;
 }
@@ -505,9 +701,10 @@ Snapshot demo_snapshot(Clock::time_point start)
     waveform.device_id = "demo/system/microphone";
     waveform.name = "Raw waveform";
     waveform.category = "microphone";
-    waveform.device = "Demo Microphone (ES8389)";
+    waveform.device = std::string("Demo ") + board_microphone_label();
     waveform.location = "system";
-    waveform.path = "demo://microphone / 48000 Hz / left channel";
+    waveform.path = native_microphone_board == MicrophoneBoard::k230 ? "demo://microphone / 48000 Hz / mono" :
+                                                                       "demo://microphone / 48000 Hz / left channel";
     waveform.available = true;
     waveform.timestamp = result.timestamp;
     waveform.waveform.reserve(240);
@@ -521,9 +718,9 @@ Snapshot demo_snapshot(Clock::time_point start)
     reading.device_id = "demo/system/microphone";
     reading.name = "RMS level";
     reading.category = "microphone";
-    reading.device = "Demo Microphone (ES8389)";
+    reading.device = result.sensors.back().device;
     reading.location = "system";
-    reading.path = "demo://microphone / 48000 Hz / left channel";
+    reading.path = result.sensors.back().path;
     reading.available = true;
     reading.timestamp = result.timestamp;
     reading.channels.push_back({"RMS", "dBFS", rms});
@@ -614,6 +811,12 @@ private:
                                 sensor.next_sample = old->next_sample;
                             }
                         }
+#if defined(__linux__) && LILYGO_UI_PLATFORM_K230
+                        if (!found.aht20_adapter.empty() && found.aht20_adapter == discovery.aht20_adapter) {
+                            found.aht20_channels = discovery.aht20_channels;
+                            found.aht20_next = discovery.aht20_next;
+                        }
+#endif
                         discovery = std::move(found);
                         next_discovery = Clock::now() + std::chrono::seconds(2);
                     }
@@ -678,7 +881,8 @@ std::unique_ptr<SensorSource> make_sensor_source()
     SourcePaths paths;
     if (const char *sys = std::getenv("LILYGO_SENSORS_SYS_ROOT"); sys && *sys) paths.sys = sys;
     if (const char *dev = std::getenv("LILYGO_SENSORS_DEV_ROOT"); dev && *dev) paths.dev = dev;
-    paths.probe_i2c = paths.sys == "/sys" && paths.dev == "/dev";
+    paths.probe_i2c = paths.sys == LILYGO_UI_DEFAULT_SYSFS_ROOT &&
+                      paths.dev == LILYGO_UI_DEFAULT_DEV_ROOT;
     const char *demo = std::getenv("LILYGO_SENSORS_DEMO");
     return std::make_unique<PollingSource>(std::move(paths), demo && std::string(demo) == "1");
 }

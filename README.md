@@ -2,7 +2,7 @@
 
 [中文 README](README.zh-CN.md)
 
-LILYGO Sensors is a native sensor and input diagnostic tool for T-DisplayCM0.
+LILYGO Sensors is a native sensor and input diagnostic tool for T-DisplayCM0 and T-Display-K230.
 It uses C++17, LVGL 9.5, and LILYGO UI AppKit, and reads measurements exposed
 by the target Linux drivers. The installed application is available from the
 LILYGO Launcher as **Sensors**.
@@ -20,8 +20,11 @@ LILYGO Launcher as **Sensors**.
 - Sensor list and per-device detail pages with measurements, history, statistics,
   filtering, pause, clear, and refresh controls.
 - IIO and hwmon discovery, including I2C bus inventory and address probing.
+- Ambient temperature and relative humidity from the T-Display-K230's onboard AHT20, using hwmon or I2C when the driver is unbound.
+- A **BQ25896** charger detail page on K230 with USB input voltage, measured charge current, charge status, input current limit and charge settings.
+- A **BQ27220** fuel gauge detail page on K230 with state of charge, battery voltage, signed current, temperature, capacities, cycle count and available time-to-full or time-to-empty estimates.
 - QMI8658 motion data, CPU and battery readings when exposed by the kernel,
-  and ES8389 microphone RMS and waveform measurements.
+  and microphone RMS and waveform measurements (K230 Goertek B4012AP422-003 via the internal INNO codec, CM0 via ES8389).
 - Per-channel CSV recording with selectable channels and explicit error values.
 - TCA8418 keyboard diagnostics with held-key state and recent input history.
 - Portrait, landscape, and small-window layouts with background acquisition.
@@ -97,3 +100,23 @@ microphone capture, and data interpretation.
 The application ID is `cc.lilygo.ui.Sensors`; the package and executable name
 is `lilygo-ui-sensors`. AppKit supplies the shared runtime fonts and their
 license notices. See [LICENSE](LICENSE) for the project license.
+
+## K230 Debian riscv64 packages
+
+The `k230-debian` preset builds the application for T-Display-K230 Debian
+riscv64. Use LPM with architecture selection support and an AppKit source SDK
+that provides `cmake/k230-debian-toolchain.cmake`. The existing CM0 ARM64 and
+host simulator presets remain available.
+
+Install `gcc-riscv64-linux-gnu` and `g++-riscv64-linux-gnu` on Linux, or LLVM, LLD and dpkg on macOS (`brew install llvm lld dpkg`). From this application's repository, run the packaging command.
+
+```sh
+lpm pack --arch riscv64
+```
+
+The `k230-debian` CMake preset downloads the pinned Debian BSP from the `LILYGO-UI/canaan-gen` release and verifies its SHA-256. It keeps the archive and `sysroot/` in this project's `.cache/k230-bsp/20261116T104343Z/`. The next build reuses the cache offline, even with a new `build/` directory. Packages appear in `dist/`.
+
+Run `lpm set-target k230` once to use `lpm pack` for subsequent builds. To use your own Debian sysroot, set `LILYGO_UI_DEBIAN_SYSROOT` before the first configure, or pass `-DLILYGO_UI_DEBIAN_SYSROOT=/path/to/sysroot` to CMake. The pinned `third_party/cm0-appkit` supplies the application SDK. `-DLilyGoUI_DIR=/path/to/appkit` selects another copy.
+
+The device build requires the riscv64 ALSA development files for microphone
+capture; these are included by the shared SDK sysroot preparation script.

@@ -6,7 +6,9 @@ project(${LILYGO_UI_CMAKE_PROJECT_NAME} LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CTest)
 # Match the 50 Hz panel in LVGL, the statically linked SDK, and this application.
-add_compile_definitions(LV_DEF_REFR_PERIOD=20)
+if(NOT LILYGO_UI_PLATFORM STREQUAL "k230")
+    add_compile_definitions(LV_DEF_REFR_PERIOD=20)
+endif()
 find_package(LilyGoUI CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -14,6 +16,7 @@ configure_file(cmake/app_identity.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/app_identity.h @ONLY)
 
 add_library(lilygo_ui_sensors_core STATIC
+    src/pages/sensors/aht20.cpp
     src/pages/keyboard/keyboard_source.cpp
     src/pages/sensors/i2c_probe.cpp
     src/pages/sensors/microphone_source.cpp
@@ -24,7 +27,11 @@ target_include_directories(lilygo_ui_sensors_core PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_compile_features(lilygo_ui_sensors_core PUBLIC cxx_std_17)
 target_compile_options(lilygo_ui_sensors_core PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(lilygo_ui_sensors_core PUBLIC Threads::Threads)
+target_link_libraries(lilygo_ui_sensors_core PUBLIC
+    Threads::Threads)
+if(TARGET LilyGoUI::Hardware)
+    target_link_libraries(lilygo_ui_sensors_core PUBLIC LilyGoUI::Hardware)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(ALSA REQUIRED)
     target_link_libraries(lilygo_ui_sensors_core PRIVATE ALSA::ALSA)
@@ -124,8 +131,18 @@ set(CPACK_DEBIAN_APP_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_APP_PACKAGE_DEPENDS
     "libc6, libstdc++6, libdrm2, libfreetype6, libasound2t64 | libasound2, lilygo-ui-appkit-dev (>= ${LILYGO_UI_MIN_APPKIT_VERSION})")
 set(CPACK_DEBIAN_APP_PACKAGE_SECTION "utils")
-set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
-if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "${LILYGO_UI_PACKAGE_ARCHITECTURE}")
+if(LILYGO_UI_DEBIAN_ARCHITECTURE)
+    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "${LILYGO_UI_DEBIAN_ARCHITECTURE}")
+elseif(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE arm64)
+endif()
+if("DEB" IN_LIST CPACK_GENERATOR AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(NOT COMMAND lilygo_ui_enable_debian_dependencies)
+        message(FATAL_ERROR
+            "Debian packaging requires an AppKit SDK with automatic runtime dependency analysis. "
+            "Update the pinned AppKit or select a compatible SDK with "
+            "-DLilyGoUI_DIR=/path/to/cm0-appkit.")
+    endif()
+    lilygo_ui_enable_debian_dependencies()
 endif()
 include(CPack)

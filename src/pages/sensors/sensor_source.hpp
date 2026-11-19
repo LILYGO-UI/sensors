@@ -1,8 +1,11 @@
 #pragma once
 
+#include "platform_paths.hpp"
+
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,6 +33,8 @@ struct SensorReading {
     std::string device_id;
     // Optional current waveform samples, normalized to signed full scale [-1, 1].
     std::vector<double> waveform;
+    // Discrete states such as a charger's health have a text value instead of numeric channels.
+    std::optional<std::string> text_value{};
 };
 
 std::string sensor_device_id(const SensorReading &reading);
@@ -69,9 +74,10 @@ public:
 
 // Root overrides support deterministic sysfs fixtures without touching hardware.
 struct SourcePaths {
-    std::filesystem::path sys = "/sys";
-    std::filesystem::path dev = "/dev";
+    std::filesystem::path sys = LILYGO_UI_DEFAULT_SYSFS_ROOT;
+    std::filesystem::path dev = LILYGO_UI_DEFAULT_DEV_ROOT;
     bool probe_i2c = true;
+    std::filesystem::path k230_power_supply{};  // Optional board-service root for offline fixtures.
 };
 
 // One-shot sysfs reads; continuous audio capture is provided by make_sensor_source().

@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 package = "lilygo-ui-sensors"
-version = "0.1.1"
+version = "0.1.4"
 app_id = "cc.lilygo.ui.Sensors"
 title = "Sensors"
 summary = "Live sensor measurements and I2C device inventory"
@@ -74,7 +74,7 @@ scope = "app-data"
 reason = "Record sensor measurements as CSV files"
 
 [project.compatibility]
-architectures = ["arm64"]
+architectures = ["arm64", "riscv64"]
 min_appkit_version = "0.1.0"
 
 [project.launcher]
@@ -84,6 +84,10 @@ order = 92
 host_preset = "host-simulator"
 cross_preset = "cm0-cross"
 package_dir = "dist"
+
+[build.cross_presets]
+arm64 = "cm0-cross"
+riscv64 = "k230-debian"
 
 [deploy]
 host = "192.168.8.206"

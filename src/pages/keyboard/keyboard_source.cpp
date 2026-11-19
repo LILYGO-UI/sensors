@@ -1,5 +1,7 @@
 #include "pages/keyboard/keyboard_source.hpp"
 
+#include "platform_paths.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -82,8 +84,8 @@ bool same_devices(const std::vector<KeyboardDevice> &a, const std::vector<Keyboa
 class EvdevKeyboardSource final : public KeyboardSource {
 public:
     EvdevKeyboardSource()
-        : sys_(root_path("LILYGO_SENSORS_SYS_ROOT", "/sys")),
-          dev_(root_path("LILYGO_SENSORS_DEV_ROOT", "/dev")), events_(state_)
+        : sys_(root_path("LILYGO_SENSORS_SYS_ROOT", LILYGO_UI_DEFAULT_SYSFS_ROOT)),
+          dev_(root_path("LILYGO_SENSORS_DEV_ROOT", LILYGO_UI_DEFAULT_DEV_ROOT)), events_(state_)
     {
         discover();
     }

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <csignal>
 #include <cmath>
 #include <exception>
 #include <iomanip>
@@ -61,6 +62,11 @@ void print_snapshot(const sensors::Snapshot &snapshot)
         json_field(out, "location", sensor.location);
         json_field(out, "path", sensor.path);
         json_field(out, "error", sensor.error);
+        if (sensor.text_value) {
+            out << ",\"text_value\":";
+            if (sensor.available) json_string(out, *sensor.text_value);
+            else out << "null";
+        }
         out << ",\"available\":" << (sensor.available ? "true" : "false")
             << ",\"timestamp_monotonic_ms\":"
             << std::chrono::duration_cast<std::chrono::milliseconds>(sensor.timestamp.time_since_epoch()).count()
@@ -128,8 +134,15 @@ void usage(std::ostream &out)
            "N: 1..10000 (default 1); MS: 50..60000 (default 250).\n";
 }
 
+volatile std::sig_atomic_t probe_stop_signal = 0;
+void stop_probe(int signal) { probe_stop_signal = signal; }
+
 int probe(unsigned samples, unsigned interval)
 {
+    // The headless entry point also needs to close ALSA and release the board route.
+    std::signal(SIGINT, stop_probe);
+    std::signal(SIGTERM, stop_probe);
+    std::signal(SIGPIPE, stop_probe);
     std::cout.imbue(std::locale::classic());
     auto source = sensors::make_sensor_source();
     source->set_interval(interval);
@@ -139,7 +152,8 @@ int probe(unsigned samples, unsigned interval)
         snapshot = source->snapshot();
         if (snapshot.sequence != 0 || snapshot.timestamp != sensors::Clock::time_point{}) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    } while (sensors::Clock::now() < deadline);
+    } while (!probe_stop_signal && sensors::Clock::now() < deadline);
+    if (probe_stop_signal) return 128 + probe_stop_signal;
     if (snapshot.sequence == 0 && snapshot.timestamp == sensors::Clock::time_point{}) {
         snapshot.error = "Timed out waiting for the first sensor snapshot";
         snapshot.timestamp = sensors::Clock::now();
@@ -151,13 +165,16 @@ int probe(unsigned samples, unsigned interval)
     for (unsigned index = 0; index < samples; ++index) {
         if (index != 0) {
             const auto previous_sequence = snapshot.sequence;
-            std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+            const auto wake = sensors::Clock::now() + std::chrono::milliseconds(interval);
+            while (!probe_stop_signal && sensors::Clock::now() < wake)
+                std::this_thread::sleep_until(std::min(wake, sensors::Clock::now() + std::chrono::milliseconds(50)));
             const auto next_deadline = sensors::Clock::now() + std::chrono::seconds(5);
             do {
                 snapshot = source->snapshot();
                 if (snapshot.sequence != previous_sequence) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            } while (sensors::Clock::now() < next_deadline);
+            } while (!probe_stop_signal && sensors::Clock::now() < next_deadline);
+            if (probe_stop_signal) return 128 + probe_stop_signal;
             if (snapshot.sequence == previous_sequence) {
                 snapshot.error = "Timed out waiting for a new sensor snapshot";
                 for (auto &sensor : snapshot.sensors) {
@@ -167,10 +184,11 @@ int probe(unsigned samples, unsigned interval)
             }
         }
         print_snapshot(snapshot);
+        if (probe_stop_signal) return 128 + probe_stop_signal;
         for (const auto &sensor : snapshot.sensors) {
-            any_valid_reading |= sensor.available &&
+            any_valid_reading |= sensor.available && (sensor.text_value.has_value() ||
                 std::any_of(sensor.channels.begin(), sensor.channels.end(),
-                            [](const auto &channel) { return std::isfinite(channel.value); });
+                            [](const auto &channel) { return std::isfinite(channel.value); }));
         }
     }
     return any_valid_reading ? 0 : 1;

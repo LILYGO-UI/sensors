@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -17,15 +18,22 @@
 
 #ifdef __linux__
 #include <alsa/asoundlib.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 #endif
 
 namespace sensors {
+
+const char *board_microphone_label(MicrophoneBoard board)
+{
+    return board == MicrophoneBoard::k230 ? "Microphone (Goertek B4012AP422-003)" : "Microphone (ES8389)";
+}
+
 namespace {
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
-constexpr unsigned capture_channels = 2;
-constexpr unsigned microphone_channel = 0;
 #ifdef __linux__
 constexpr unsigned sample_rate = 48000;
 constexpr std::size_t window_frames = sample_rate / 10;
@@ -39,10 +47,21 @@ double dbfs(double amplitude)
 }
 
 struct CaptureDevice {
+    explicit CaptureDevice(MicrophoneBoard board, const std::string &override_device)
+        : alsa(override_device), board(board), overridden(!override_device.empty()) {}
+
+    const char *card() const { return board == MicrophoneBoard::k230 ? "K230I2SINNO" : "ES8389"; }
+    unsigned channels() const { return board == MicrophoneBoard::k230 && !overridden ? 1 : 2; }
+    std::string identity() const {
+        const std::string id = alsa.empty() ? (board == MicrophoneBoard::k230 ? "k230i2sinno" : "es8389") : alsa;
+        return "alsa:" + id + (channels() == 1 ? "/mono" : "/left");
+    }
+
     std::string alsa;
-    std::string label = "Microphone (ES8389)";
-    std::string identity = "alsa:es8389/left";
+    MicrophoneBoard board;
+    bool overridden;
     std::string node;
+    std::string control_node;
     std::string error;
 };
 
@@ -61,15 +80,10 @@ std::vector<fs::path> sound_entries(const fs::path &directory, std::string &erro
     return result;
 }
 
-CaptureDevice discover_device(const SourcePaths &paths, const std::string &override_device)
+CaptureDevice discover_device(const SourcePaths &paths, MicrophoneBoard board, const std::string &override_device)
 {
-    CaptureDevice result;
-    if (!override_device.empty()) {
-        result.alsa = override_device;
-        result.label = "Microphone (ALSA)";
-        result.identity = "alsa:" + override_device + "/left";
-        return result;
-    }
+    CaptureDevice result(board, override_device);
+    if (result.overridden) return result;
 
     const auto entries = sound_entries(paths.sys / "class/sound", result.error);
     const std::regex card_pattern("card([0-9]+)");
@@ -82,18 +96,27 @@ CaptureDevice discover_device(const SourcePaths &paths, const std::string &overr
         std::ifstream input(card / "id");
         std::string identifier;
         std::getline(input, identifier);
-        std::transform(identifier.begin(), identifier.end(), identifier.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-        if (identifier.find("es8389") == std::string::npos) continue;
+        if (board == MicrophoneBoard::k230) {
+            if (identifier != result.card()) continue;
+        } else {
+            std::transform(identifier.begin(), identifier.end(), identifier.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            if (identifier.find("es8389") == std::string::npos) continue;
+        }
         found_card = true;
         for (const auto &capture : entries) {
             std::smatch capture_match;
             const auto capture_name = capture.filename().string();
             if (!std::regex_match(capture_name, capture_match, capture_pattern) ||
                 capture_match[1].str() != card_match[1].str()) continue;
-            result.alsa = "plughw:" + card_match[1].str() + "," + capture_match[2].str();
-            result.identity = "alsa:" + result.alsa + "/left";
+            if (board == MicrophoneBoard::k230) {
+                if (capture_match[2].str() != "0") continue;
+                result.alsa = "plughw:CARD=K230I2SINNO,DEV=0";
+                result.control_node = (paths.dev / "snd" / ("controlC" + card_match[1].str())).string();
+            } else {
+                result.alsa = "plughw:" + card_match[1].str() + "," + capture_match[2].str();
+            }
             result.node = (paths.dev / "snd" / capture_name).string();
             std::error_code ec;
             if (!fs::exists(result.node, ec))
@@ -102,8 +125,8 @@ CaptureDevice discover_device(const SourcePaths &paths, const std::string &overr
         }
     }
     if (result.error.empty())
-        result.error = found_card ? "ES8389 sound card has no capture device" :
-                                   "ES8389 microphone sound card not found";
+        result.error = std::string(result.card()) + (found_card ? " sound card has no capture device" :
+                                                                 " microphone sound card not found");
     return result;
 }
 
@@ -120,14 +143,15 @@ std::vector<SensorReading> readings_for(const CaptureDevice &device,
     std::vector<SensorReading> result;
     for (std::size_t index = 0; index < names.size(); ++index) {
         SensorReading reading;
-        reading.id = device.identity + "/" + keys[index];
+        reading.device_id = device.identity();
+        reading.id = reading.device_id + "/" + keys[index];
         reading.name = names[index];
         reading.category = "microphone";
-        reading.device = device.label;
-        reading.device_id = device.identity;
+        reading.device = device.overridden ? "Microphone (ALSA)" : board_microphone_label(device.board);
         reading.location = "system";
-        reading.path = "ALSA " + (device.alsa.empty() ? std::string("ES8389 (not found)") : device.alsa) +
-                       "; 48000 Hz S16_LE stereo; left channel; 100 ms";
+        reading.path = "ALSA " + (device.alsa.empty() ? std::string(device.card()) + " (not found)" : device.alsa) +
+                       (device.channels() == 1 ? "; 48000 Hz S16_LE mono; 100 ms" :
+                                                 "; 48000 Hz S16_LE stereo; left channel; 100 ms");
         if (!device.node.empty()) reading.path += "; " + device.node;
         reading.available = levels.has_value() && error.empty();
         reading.error = error;
@@ -143,6 +167,45 @@ std::vector<SensorReading> readings_for(const CaptureDevice &device,
 }
 
 #ifdef __linux__
+// The board service controls both the codec route and the speaker amplifier.
+// It accepts route changes only while the PCM is closed.
+struct K230MicRoute {
+    bool restore_external = false;
+    int lock_fd = -1;
+
+    static std::string request(const char *command)
+    {
+        char output[32]{};
+        auto *pipe = ::popen(command, "r");
+        if (!pipe) return {};
+        const bool received = std::fgets(output, sizeof(output), pipe) != nullptr;
+        if (::pclose(pipe) != 0 || !received) return {};
+        return output;
+    }
+
+    std::string acquire(const std::string &control_node)
+    {
+        // Serialize Sensors instances across status, capture, close and restore.
+        lock_fd = ::open(control_node.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (lock_fd < 0) return "Microphone control node unavailable: " + control_node;
+        if (::flock(lock_fd, LOCK_EX | LOCK_NB) != 0) return "Microphone audio route busy or unavailable";
+        const auto original = request("/usr/bin/lilygo-k230-audio-route status");
+        if (original == "internal\n") return {};
+        if (original != "external\n") return "K230 audio route unavailable; check lilygo-k230-audio.service";
+        if (request("/usr/bin/lilygo-k230-audio-route internal") != "internal\n")
+            return "Could not select K230 microphone route; check active audio streams";
+        restore_external = true;
+        return {};
+    }
+
+    ~K230MicRoute()
+    {
+        if (restore_external && request("/usr/bin/lilygo-k230-audio-route external") != "external\n")
+            std::fputs("Could not restore K230 external audio route\n", stderr);
+        if (lock_fd >= 0) ::close(lock_fd);
+    }
+};
+
 struct PcmHandle {
     snd_pcm_t *value = nullptr;
     ~PcmHandle()
@@ -232,31 +295,32 @@ std::string alsa_error(const char *operation, int error)
 }  // namespace
 
 std::optional<MicrophoneLevels> calculate_microphone_levels(
-    const std::int16_t *samples, std::size_t sample_count)
+    const std::int16_t *samples, std::size_t sample_count, unsigned channels)
 {
-    if (!samples || sample_count == 0 || sample_count % capture_channels != 0) return std::nullopt;
+    if (!samples || sample_count == 0 || (channels != 1 && channels != 2) || sample_count % channels != 0)
+        return std::nullopt;
     double sum_squares = 0;
-    const auto frames = sample_count / capture_channels;
+    const auto frames = sample_count / channels;
     std::vector<double> waveform;
     waveform.reserve(waveform_points);
-    for (std::size_t index = microphone_channel; index < sample_count; index += capture_channels) {
+    for (std::size_t index = 0; index < sample_count; index += channels) {
         const int magnitude = std::abs(static_cast<int>(samples[index]));
         const double amplitude = magnitude / 32768.0;
         sum_squares += amplitude * amplitude;
     }
     for (std::size_t point = 0; point < waveform_points; ++point) {
         const auto frame = std::min(frames - 1, point * frames / waveform_points);
-        waveform.push_back(static_cast<double>(samples[frame * capture_channels + microphone_channel]) / 32768.0);
+        waveform.push_back(static_cast<double>(samples[frame * channels]) / 32768.0);
     }
     return MicrophoneLevels{dbfs(std::sqrt(sum_squares / frames)), std::move(waveform)};
 }
 
 class MicrophoneSource::Impl {
 public:
-    explicit Impl(SourcePaths paths) : paths_(std::move(paths))
+    Impl(SourcePaths paths, MicrophoneBoard board) : paths_(std::move(paths)), board_(board)
     {
         if (const auto *value = std::getenv("LILYGO_SENSORS_MIC_DEVICE")) override_device_ = value;
-        readings_ = readings_for(CaptureDevice{}, "Microphone discovery pending");
+        readings_ = readings_for(CaptureDevice(board_, override_device_), "Microphone discovery pending");
         worker_ = std::thread([this] { run(); });
     }
 
@@ -317,20 +381,26 @@ private:
 #ifdef __linux__
     std::string capture(const CaptureDevice &device)
     {
+        K230MicRoute route; // Destroy after the PCM handle, including on setup failures.
+        if (device.board == MicrophoneBoard::k230 && !device.overridden) {
+            auto error = route.acquire(device.control_node);
+            if (!error.empty()) return error;
+        }
         PcmHandle pcm;
         CaptureGain gain;
         int status = snd_pcm_open(&pcm.value, device.alsa.c_str(), SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
         if (status < 0) return alsa_error("open failed", status);
-        set_capture_gain(device.alsa, gain);
+        if (device.board == MicrophoneBoard::cm0 && !device.overridden) set_capture_gain(device.alsa, gain);
+        const unsigned capture_channels = device.channels();
         status = snd_pcm_set_params(pcm.value, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
                                     capture_channels, sample_rate, 1, 200000);
-        if (status < 0) return alsa_error("48 kHz stereo setup failed", status);
+        if (status < 0) return alsa_error("48 kHz PCM setup failed", status);
         status = snd_pcm_prepare(pcm.value);
         if (status < 0) return alsa_error("prepare failed", status);
         status = snd_pcm_start(pcm.value);
         if (status < 0) return alsa_error("start failed", status);
 
-        std::array<std::int16_t, window_frames * capture_channels> samples{};
+        std::vector<std::int16_t> samples(window_frames * capture_channels);
         std::size_t collected = 0;
         auto last_window = Clock::now();
         while (!interrupted()) {
@@ -347,7 +417,7 @@ private:
                 return "Microphone returned an invalid capture frame count";
             collected += static_cast<std::size_t>(count);
             if (collected == window_frames) {
-                publish(device, {}, calculate_microphone_levels(samples.data(), samples.size()));
+                publish(device, {}, calculate_microphone_levels(samples.data(), samples.size(), capture_channels));
                 collected = 0;
                 last_window = Clock::now();
             }
@@ -364,10 +434,10 @@ private:
                 if (stopping_) return;
                 reopen_ = false;
             }
-            CaptureDevice device;
+            CaptureDevice device(board_, override_device_);
             std::string error;
             try {
-                device = discover_device(paths_, override_device_);
+                device = discover_device(paths_, board_, override_device_);
                 error = device.error;
                 if (error.empty() && (paths_.sys != fs::path("/sys") || paths_.dev != fs::path("/dev")))
                     error = "Microphone hardware capture disabled for overridden sys/dev roots";
@@ -388,6 +458,7 @@ private:
     }
 
     SourcePaths paths_;
+    MicrophoneBoard board_;
     std::string override_device_;
     std::mutex mutex_;
     std::condition_variable wake_;
@@ -397,7 +468,8 @@ private:
     std::thread worker_;
 };
 
-MicrophoneSource::MicrophoneSource(SourcePaths paths) : impl_(std::make_unique<Impl>(std::move(paths))) {}
+MicrophoneSource::MicrophoneSource(SourcePaths paths, MicrophoneBoard board)
+    : impl_(std::make_unique<Impl>(std::move(paths), board)) {}
 MicrophoneSource::~MicrophoneSource() = default;
 std::vector<SensorReading> MicrophoneSource::snapshot() { return impl_->snapshot(); }
 void MicrophoneSource::rescan() { impl_->rescan(); }

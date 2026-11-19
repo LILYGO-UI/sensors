@@ -92,7 +92,7 @@ std::vector<SensorReading> wait_for(MicrophoneSource &source,
     throw std::runtime_error(message);
 }
 
-void require_unavailable(const std::vector<SensorReading> &readings)
+void require_unavailable(const std::vector<SensorReading> &readings, const char *channel = "left")
 {
     require(readings.size() == 2, "microphone always has two measurement entries");
     const std::vector<std::string> names{"Raw waveform", "RMS level"};
@@ -112,7 +112,7 @@ void require_unavailable(const std::vector<SensorReading> &readings)
                         reading.channels.front().unit == units[index] && reading.channels.front().value == 0,
                     "unavailable RMS retains channel metadata");
         }
-        require(reading.path.find("48000") != std::string::npos && reading.path.find("left") != std::string::npos &&
+        require(reading.path.find("48000") != std::string::npos && reading.path.find(channel) != std::string::npos &&
                 reading.path.find("100 ms") != std::string::npos, "capture metadata includes rate, channel and window");
     }
     require(readings[0].id != readings[1].id, "each measurement has distinct identity");
@@ -165,7 +165,7 @@ void discovery_and_rescan()
     fixture.card(3, "  BoardEs8389  ");
     fixture.pcm(3, 0, 'p');
     fixture.pcm(3, 1, 'c');
-    MicrophoneSource source(fixture.paths);
+    MicrophoneSource source(fixture.paths, MicrophoneBoard::cm0);
     auto readings = wait_for(source, [](const SensorReading &reading) {
         return reading.error.find("disabled for overridden") != std::string::npos;
     }, "fixture microphone is discovered without hardware capture");
@@ -204,6 +204,43 @@ void discovery_and_rescan()
     require_unavailable(readings);
 }
 
+void k230_onboard_microphone()
+{
+    Environment environment;
+    Fixture fixture;
+    fixture.card(0, "CM0ES8389");
+    fixture.pcm(0, 0, 'c');
+    fixture.card(1, "USB");
+    fixture.pcm(1, 0, 'c');
+    MicrophoneSource source(fixture.paths, MicrophoneBoard::k230);
+    auto readings = wait_for(source, [](const auto &r) {
+        return r.error == "K230I2SINNO microphone sound card not found";
+    }, "K230 ignores ES8389 and USB cards");
+    require_unavailable(readings, "mono");
+    fixture.card(3, "K230I2SINNO");
+    fixture.pcm(3, 0, 'p');
+    source.rescan();
+    wait_for(source, [](const auto &r) { return r.error.find("no capture device") != std::string::npos; },
+             "K230 ignores playback PCM");
+    fixture.pcm(3, 0, 'c');
+    source.rescan();
+    readings = wait_for(source, [](const auto &r) { return r.error.find("disabled for overridden") != std::string::npos; },
+                        "discover the K230 capture PCM on a renumbered card");
+    require_unavailable(readings, "mono");
+    for (const auto &r : readings) {
+        require(r.device == "Microphone (Goertek B4012AP422-003)" &&
+                r.path.find("plughw:CARD=K230I2SINNO,DEV=0") != std::string::npos &&
+                r.path.find("pcmC3D0c") != std::string::npos, "K230 onboard microphone identity and PCM");
+    }
+
+    std::vector<std::int16_t> mono(4800);
+    for (std::size_t i = 0; i < mono.size(); ++i) mono[i] = ((i / 20) % 2) ? -16384 : 16384;
+    const auto levels = calculate_microphone_levels(mono.data(), mono.size(), 1);
+    require(levels && levels->waveform.size() == 240, "K230 mono waveform size");
+    near(levels->rms_dbfs, -6.0206, 0.001, "mono RMS");
+    require(levels->waveform[0] == 0.5 && levels->waveform[1] == -0.5, "mono waveform stride");
+}
+
 void override_roots_never_capture()
 {
     Environment environment("null");
@@ -233,6 +270,7 @@ int main()
         known_sine();
         invalid_windows();
         discovery_and_rescan();
+        k230_onboard_microphone();
         override_roots_never_capture();
         std::cout << "microphone source tests passed\n";
         return 0;
